@@ -66,7 +66,7 @@ def _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params):
         Xi_valid_, Xv_valid_, y_valid_ = _get(Xi_train, valid_idx), _get(Xv_train, valid_idx), _get(y_train, valid_idx)
 
         dfm = DeepFM(**dfm_params)
-        dfm.fit(Xi_train_, Xv_train_, y_train_, Xi_valid_, Xv_valid_, y_valid_)
+        dfm.fit(Xi_train_, Xv_train_, y_train_, Xi_valid_, Xv_valid_, y_valid_, fold_seq=i)
 
         y_train_meta[valid_idx,0] = dfm.predict(Xi_valid_, Xv_valid_)
         y_test_meta[:,0] += dfm.predict(Xi_test, Xv_test)
@@ -124,8 +124,7 @@ folds = list(StratifiedKFold(n_splits=config.NUM_SPLITS, shuffle=True,
                              random_state=config.RANDOM_SEED).split(X_train, y_train))
 
 
-# ------------------ DeepFM Model ------------------
-# params
+# DeepFM params
 dfm_params = {
     "use_fm": True,
     "use_deep": True,
@@ -143,20 +142,21 @@ dfm_params = {
     "l2_reg": 0.01,
     "verbose": True,
     "eval_metric": gini_norm,
-    "random_seed": config.RANDOM_SEED
+    "random_seed": config.RANDOM_SEED,
+    "is_finetune": True
 }
-y_train_dfm, y_test_dfm = _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params)
+# ------------------ DeepFM Model --------------
+# y_train_dfm, y_test_dfm = _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params)
 
 # ------------------ FM Model ------------------
 fm_params = dfm_params.copy()
 fm_params["use_deep"] = False
 y_train_fm, y_test_fm = _run_base_model_dfm(dfTrain, dfTest, folds, fm_params)
 
-
 # ------------------ DNN Model ------------------
-dnn_params = dfm_params.copy()
-dnn_params["use_fm"] = False
-y_train_dnn, y_test_dnn = _run_base_model_dfm(dfTrain, dfTest, folds, dnn_params)
-
+# dnn_params = dfm_params.copy()
+# dnn_params["use_fm"] = False
+# y_train_dnn, y_test_dnn = _run_base_model_dfm(dfTrain, dfTest, folds, dnn_params)
+#
 
 

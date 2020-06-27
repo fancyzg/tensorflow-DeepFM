@@ -8,6 +8,8 @@ Reference:
 
 import numpy as np
 import tensorflow as tf
+import os
+import example.config as config
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import roc_auc_score
 from time import time
@@ -26,7 +28,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
                  verbose=False, random_seed=2016,
                  use_fm=True, use_deep=True,
                  loss_type="logloss", eval_metric=roc_auc_score,
-                 l2_reg=0.0, greater_is_better=True):
+                 l2_reg=0.0, greater_is_better=True, is_finetune=False):
         assert (use_fm or use_deep)
         assert loss_type in ["logloss", "mse"], \
             "loss_type can be either 'logloss' for classification task or 'mse' for regression task"
@@ -57,6 +59,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
         self.eval_metric = eval_metric
         self.greater_is_better = greater_is_better
         self.train_result, self.valid_result = [], []
+        self.is_finetune = is_finetune
 
         self._init_graph()
 
@@ -66,11 +69,9 @@ class DeepFM(BaseEstimator, TransformerMixin):
         with self.graph.as_default():
 
             tf.set_random_seed(self.random_seed)
-
-            self.feat_index = tf.placeholder(tf.int32, shape=[None, None],
-                                                 name="feat_index")  # None * F
-            self.feat_value = tf.placeholder(tf.float32, shape=[None, None],
-                                                 name="feat_value")  # None * F
+            self.sess = self._init_session()
+            self.feat_index = tf.placeholder(tf.int32, shape=[None, None], name="feat_index")  # None * F
+            self.feat_value = tf.placeholder(tf.float32, shape=[None, None], name="feat_value")  # None * F
             self.label = tf.placeholder(tf.float32, shape=[None, 1], name="label")  # None * 1
             self.dropout_keep_fm = tf.placeholder(tf.float32, shape=[None], name="dropout_keep_fm")
             self.dropout_keep_deep = tf.placeholder(tf.float32, shape=[None], name="dropout_keep_deep")
@@ -79,8 +80,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
             self.weights = self._initialize_weights()
 
             # model
-            self.embeddings = tf.nn.embedding_lookup(self.weights["feature_embeddings"],
-                                                             self.feat_index)  # None * F * K
+            self.embeddings = tf.nn.embedding_lookup(self.weights["feature_embeddings"], self.feat_index)  # None * F * K
             feat_value = tf.reshape(self.feat_value, shape=[-1, self.field_size, 1])
             self.embeddings = tf.multiply(self.embeddings, feat_value)
 
@@ -135,7 +135,8 @@ class DeepFM(BaseEstimator, TransformerMixin):
                     for i in range(len(self.deep_layers)):
                         self.loss += tf.contrib.layers.l2_regularizer(
                             self.l2_reg)(self.weights["layer_%d"%i])
-
+            # for nn in self.graph.as_graph_def().node:
+            #     print(nn.name)
             # optimizer
             if self.optimizer_type == "adam":
                 self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate, beta1=0.9, beta2=0.999,
@@ -154,11 +155,16 @@ class DeepFM(BaseEstimator, TransformerMixin):
 
             # init
             self.saver = tf.train.Saver()
-            init = tf.global_variables_initializer()
-            self.sess = self._init_session()
-            self.sess.run(init)
-
-            # number of params
+            if self.is_finetune:
+                self._load_old_model()
+                # opt = tf.train.MomentumOptimizer(learning_rate=self.learning_rate, momentum=0.95)
+                # self.optimizer = opt.minimize(self.loss)
+                # self.sess.run(tf.variables_initializer(opt.variables()))
+                # pass
+            else:
+                init = tf.global_variables_initializer()
+                self.sess.run(init)
+                # number of params
             total_parameters = 0
             for variable in self.weights.values():
                 shape = variable.get_shape()
@@ -176,9 +182,28 @@ class DeepFM(BaseEstimator, TransformerMixin):
         return tf.Session(config=config)
 
 
+    def _load_old_model(self):
+        weights = dict()
+        #saver = tf.train.import_meta_graph(os.path.join(config.SUB_DIR, 'model/0', 'fm-series-%d.meta' % (self.epoch-1)))
+        self.saver.restore(self.sess, tf.train.latest_checkpoint(os.path.join(config.SUB_DIR, 'model/0')))
+        # graph = tf.get_default_graph()
+        # weights["feature_embeddings"] = graph.get_tensor_by_name("feature_embeddings:0")
+        # weights["feature_bias"] = graph.get_tensor_by_name("feature_bias:0")
+        # weights["layer_0"] = graph.get_tensor_by_name("layer_0:0")
+        # weights["bias_0"] = graph.get_tensor_by_name("bias_0:0")
+        # num_layer = len(self.deep_layers)
+        # for i in range(1, num_layer):
+        #     weights["layer_%d" % i] = graph.get_tensor_by_name("layer_%d:0" % i)
+        #     weights["bias_%d"% i] = graph.get_tensor_by_name("bias_%d:0" % i)
+        #
+        # weights["concat_projection"] = graph.get_tensor_by_name("concat_projection:0")
+        # weights["concat_bias"] = graph.get_tensor_by_name("concat_bias:0")
+        #
+        # self.weights = weights
+
+
     def _initialize_weights(self):
         weights = dict()
-
         # embeddings
         weights["feature_embeddings"] = tf.Variable(
             tf.random_normal([self.feature_size, self.embedding_size], 0.0, 0.01),
@@ -191,17 +216,17 @@ class DeepFM(BaseEstimator, TransformerMixin):
         input_size = self.field_size * self.embedding_size
         glorot = np.sqrt(2.0 / (input_size + self.deep_layers[0]))
         weights["layer_0"] = tf.Variable(
-            np.random.normal(loc=0, scale=glorot, size=(input_size, self.deep_layers[0])), dtype=np.float32)
+            np.random.normal(loc=0, scale=glorot, size=(input_size, self.deep_layers[0])), dtype=np.float32, name="layer_0")
         weights["bias_0"] = tf.Variable(np.random.normal(loc=0, scale=glorot, size=(1, self.deep_layers[0])),
-                                                        dtype=np.float32)  # 1 * layers[0]
+                                                        dtype=np.float32, name="bias_0")  # 1 * layers[0]
         for i in range(1, num_layer):
             glorot = np.sqrt(2.0 / (self.deep_layers[i-1] + self.deep_layers[i]))
             weights["layer_%d" % i] = tf.Variable(
                 np.random.normal(loc=0, scale=glorot, size=(self.deep_layers[i-1], self.deep_layers[i])),
-                dtype=np.float32)  # layers[i-1] * layers[i]
+                dtype=np.float32, name="layer_%d" % i)  # layers[i-1] * layers[i]
             weights["bias_%d" % i] = tf.Variable(
                 np.random.normal(loc=0, scale=glorot, size=(1, self.deep_layers[i])),
-                dtype=np.float32)  # 1 * layer[i]
+                dtype=np.float32, name="bias_%d" % i )  # 1 * layer[i]
 
         # final concat projection layer
         if self.use_fm and self.use_deep:
@@ -213,8 +238,8 @@ class DeepFM(BaseEstimator, TransformerMixin):
         glorot = np.sqrt(2.0 / (input_size + 1))
         weights["concat_projection"] = tf.Variable(
                         np.random.normal(loc=0, scale=glorot, size=(input_size, 1)),
-                        dtype=np.float32)  # layers[i-1]*layers[i]
-        weights["concat_bias"] = tf.Variable(tf.constant(0.01), dtype=np.float32)
+                        dtype=np.float32, name="concat_projection")  # layers[i-1]*layers[i]
+        weights["concat_bias"] = tf.Variable(tf.constant(0.01), dtype=np.float32, name="concat_bias")
 
         return weights
 
@@ -258,7 +283,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
 
     def fit(self, Xi_train, Xv_train, y_train,
             Xi_valid=None, Xv_valid=None, y_valid=None,
-            early_stopping=False, refit=False):
+            early_stopping=False, refit=False, fold_seq = 0):
         """
         :param Xi_train: [[ind1_1, ind1_2, ...], [ind2_1, ind2_2, ...], ..., [indi_1, indi_2, ..., indi_j, ...], ...]
                          indi_j is the feature index of feature field j of sample i in the training set
@@ -281,7 +306,7 @@ class DeepFM(BaseEstimator, TransformerMixin):
             for i in range(total_batch):
                 Xi_batch, Xv_batch, y_batch = self.get_batch(Xi_train, Xv_train, y_train, self.batch_size, i)
                 self.fit_on_batch(Xi_batch, Xv_batch, y_batch)
-
+            self.saver.save(self.sess, os.path.join(config.SUB_DIR, 'model', str(fold_seq), 'fm-series'), global_step=epoch)
             # evaluate training and validation datasets
             train_result = self.evaluate(Xi_train, Xv_train, y_train)
             self.train_result.append(train_result)
